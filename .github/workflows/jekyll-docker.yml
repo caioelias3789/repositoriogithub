@@ -1,4 +1,4 @@
-name: Jekyll site CI
+name: Jekyll site CI com DevSecOps
 
 on:
   push:
@@ -8,7 +8,7 @@ on:
 
 jobs:
   sast_scan:
-    name: SAST
+    name: 🛡️ SAST (Análise Estática)
     runs-on: ubuntu-latest
     steps:
       - name: ⬇️ Checkout code
@@ -25,14 +25,74 @@ jobs:
         if: always()
         with:
           sarif_file: semgrep.sarif
+          
   build:
     needs: sast_scan 
     runs-on: ubuntu-latest
-
     steps:
-    - uses: actions/checkout@v4
-    - name: Build the site in the jekyll/builder container
-      run: |
-        docker run \
-        -v ${{ github.workspace }}:/srv/jekyll -v ${{ github.workspace }}/_site:/srv/jekyll/_site \
-        jekyll/builder:latest /bin/bash -c "chmod -R 777 /srv/jekyll && jekyll build --future"
+      - uses: actions/checkout@v4
+      - name: Build the site in the jekyll/builder container
+        run: |
+          # O volume mount garante que a pasta _site seja criada no workspace
+          docker run \
+          -v ${{ github.workspace }}:/srv/jekyll -v ${{ github.workspace }}/_site:/srv/jekyll/_site \
+          jekyll/builder:latest /bin/bash -c "chmod -R 777 /srv/jekyll && jekyll build --future"
+
+      # NOVIDADE: Salva o site compilado para que o deploy possa usá-lo
+      - name: 📦 Upload Compiled Site (_site folder)
+        uses: actions/upload-artifact@v4
+        with:
+          name: jekyll-site-output
+          path: _site/
+
+  deploy_staging:
+    name: 🚀 Deploy Staging Temporário (Netlify)
+    needs: build
+    runs-on: ubuntu-latest
+    
+    # CRÍTICO: Define a URL de saída para o Job DAST
+    outputs:
+      staging_url: ${{ steps.netlify.outputs.preview_url }}
+      
+    steps:
+      - name: 📥 Download Compiled Site
+        uses: actions/download-artifact@v4
+        with:
+          name: jekyll-site-output
+          path: _site/
+          
+      - name: 🚀 Deploy to Netlify Staging
+        id: netlify
+        uses: nwtgck/actions-netlify@v2.0
+        with:
+          publish-dir: '_site'
+          # Você deve criar estas Secrets no seu repositório
+          site-id: ${{ secrets.NETLIFY_SITE_ID }} 
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}S
+          netlify-deploy-preview: true # Gera a URL pública temporária
+
+  dast_scan:
+    name: 🌐 DAST (Análise Dinâmica)
+    # Roda somente após o deploy ser concluído e ter a URL de saída
+    needs: deploy_staging 
+    runs-on: ubuntu-latest
+    steps:
+      - name: ⏳ Wait for deployment propagation
+        run: sleep 10 # Dá um tempo para o Netlify ativar a URL
+        
+      - name: 🛡️ Run OWASP ZAP Baseline Scan
+        uses: zaproxy/action-baseline@v0.8.1
+        with:
+          # Usa a URL exportada pelo Job deploy_staging
+          target: ${{ needs.deploy_staging.outputs.staging_url }} 
+          # Flags para DAST
+          # -l FAIL fará o job falhar se encontrar vulnerabilidades de risco High/Medium
+          options: '-l FAIL' 
+          token: ${{ secrets.GITHUB_TOKEN }}
+          
+      - name: 📤 Upload ZAP Report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dast-zap-report
+          path: zap_report.html
